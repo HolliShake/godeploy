@@ -4,6 +4,10 @@ GoDeploy is a desktop app for managing Git-backed Node.js projects and running a
 
 > **Current scope:** The Deploy workflow clones a repository and installs/builds it locally. It does not currently start or manage applications with PM2, and it does not run Bun commands.
 
+## Screenshot
+
+![GoDeploy project workspace](docs/sample-1.png)
+
 ## Features
 
 - Create, edit, search, and delete projects.
