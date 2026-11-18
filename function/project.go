@@ -19,6 +19,7 @@ type Project struct {
 	GitUsername         string
 	GitEmail            string
 	NpmPackage          *NpmPackage
+	PM2Process          *PM2Process
 }
 
 func CreateNewProject(state *State, project Project) error {

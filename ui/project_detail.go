@@ -464,6 +464,8 @@ func npmPackageCard(pkg *functions.NpmPackage, err error) fyne.CanvasObject {
 			field("Version", monoValue(pkg.Version, "Not configured")),
 		),
 		vSpacer(8),
+		field("Project type", monoValue(string(pkg.ProjectType), "vanilla")),
+		vSpacer(8),
 		field("Module type", monoValue(string(pkg.Type), "commonjs")),
 		vSpacer(8),
 		widget.NewAccordion(widget.NewAccordionItem(

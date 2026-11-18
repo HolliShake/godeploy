@@ -12,7 +12,7 @@ GoDeploy is a desktop app for managing Git-backed Node.js projects and running a
 
 - Create, edit, search, and delete projects.
 - Configure a repository URL, branch, optional personal access token, and Git identity.
-- View detected `package.json` metadata and sorted script names/commands.
+- View detected `package.json` metadata, framework type, and sorted script names/commands.
 - Follow deployment output and status in the app.
 - Clone private HTTPS repositories with a personal access token. The token is masked in project details, redacted from Git output, and removed from the checkout's `origin` URL after cloning.
 
@@ -31,8 +31,9 @@ Git, npm, and build output is shown in the deployment terminal.
 - Go 1.25.5 or later to run from source.
 - Git available on `PATH`.
 - Node.js with npm available on `PATH`.
+- PM2 available on `PATH` so GoDeploy can read the current process list.
 
-PM2 is not required by the current workflow because PM2 process start/restart is not implemented.
+The Deploy workflow does not yet start, stop, or restart PM2 processes.
 
 ## Run from source
 
