@@ -250,18 +250,25 @@ func NpmBuildWithOutput(project Project, output io.Writer) error {
 		_, _ = fmt.Fprintln(output, "No npm package detected; skipping build.")
 		return nil
 	}
-	buildScript, ok := project.NpmPackage.Scripts["build"]
-	if !ok {
-		_, _ = fmt.Fprintln(output, "No build script configured; skipping npm build.")
+	buildCommand, usePackageBuildScript := npmBuildCommand(project)
+	if buildCommand == "" {
+		_, _ = fmt.Fprintln(output, "No build command configured; skipping npm build.")
 		return nil
 	}
 
 	projectPath := filepath.Dir(npmPackageManifestPath(project))
-	args := []string{"--foreground-scripts", "--no-progress", "--loglevel=info", "run", "build"}
-	_, _ = fmt.Fprintf(output, "$ npm %s\n", strings.Join(args, " "))
-	_, _ = fmt.Fprintf(output, "> %s\n", buildScript)
-	if err := runNpmCommand(projectPath, output, args...); err != nil {
-		return fmt.Errorf("run npm build in %q: %w", projectPath, err)
+	if usePackageBuildScript {
+		args := []string{"--foreground-scripts", "--no-progress", "--loglevel=info", "run", "build"}
+		_, _ = fmt.Fprintf(output, "$ npm %s\n", strings.Join(args, " "))
+		_, _ = fmt.Fprintf(output, "> %s\n", buildCommand)
+		if err := runNpmCommand(projectPath, output, args...); err != nil {
+			return fmt.Errorf("run npm build in %q: %w", projectPath, err)
+		}
+	} else {
+		_, _ = fmt.Fprintf(output, "$ %s\n", buildCommand)
+		if err := runBuildCommand(projectPath, output, buildCommand); err != nil {
+			return fmt.Errorf("run build command in %q: %w", projectPath, err)
+		}
 	}
 
 	outDir, err := findBuildOutputDir(projectPath, project.NpmPackage.ProjectType)
@@ -271,6 +278,13 @@ func NpmBuildWithOutput(project Project, output io.Writer) error {
 
 	_, _ = fmt.Fprintf(output, "npm build completed. Output directory: %s\n", outDir)
 	return nil
+}
+
+func npmBuildCommand(project Project) (string, bool) {
+	if command := strings.TrimSpace(project.BuildCommand); command != "" {
+		return command, false
+	}
+	return strings.TrimSpace(project.NpmPackage.Scripts["build"]), true
 }
 
 // npmBuildOutputCandidates lists the directories each framework may emit,
@@ -326,5 +340,18 @@ func runNpmCommand(workingDir string, output io.Writer, args ...string) error {
 	cmd.Stdout = output
 	cmd.Stderr = output
 
+	return cmd.Run()
+}
+
+func runBuildCommand(workingDir string, output io.Writer, command string) error {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd.exe", "/c", command)
+	} else {
+		cmd = exec.Command("sh", "-c", command)
+	}
+	cmd.Dir = workingDir
+	cmd.Stdout = output
+	cmd.Stderr = output
 	return cmd.Run()
 }

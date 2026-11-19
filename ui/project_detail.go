@@ -370,6 +370,7 @@ func NewProjectDetail(project functions.Project) fyne.CanvasObject {
 	details := container.NewVScroll(padded)
 
 	var deploy *widget.Button
+	processRunning := project.PM2Process != nil && project.PM2Process.IsRunning
 	deploy = widget.NewButtonWithIcon("Deploy", theme.UploadIcon(), func() {
 		deploy.Disable()
 		deploy.SetText("Deploying...")
@@ -393,8 +394,13 @@ func NewProjectDetail(project functions.Project) fyne.CanvasObject {
 					status.Set("Done", colSuccess)
 				}
 				fyne.Do(func() {
-					deploy.SetText("Deploy")
-					deploy.Enable()
+					if err == nil {
+						deploy.SetText("Running")
+						deploy.Disable()
+					} else {
+						deploy.SetText("Deploy")
+						deploy.Enable()
+					}
 				})
 			}()
 
@@ -404,13 +410,27 @@ func NewProjectDetail(project functions.Project) fyne.CanvasObject {
 				project.NpmPackage, err = functions.DetectNpmPackage(project)
 			}
 			if err == nil {
+				var envPath string
+				envPath, err = functions.WriteProjectEnvironmentFile(project)
+				if err == nil && envPath != "" {
+					_, _ = fmt.Fprintf(terminal, "Wrote project environment file: %s\n", envPath)
+				}
+			}
+			if err == nil {
 				err = functions.NpmInstallWithOutput(project, terminal)
 			}
 			if err == nil {
 				err = functions.NpmBuildWithOutput(project, terminal)
 			}
+			if err == nil {
+				err = functions.Pm2DeployWithOutput(project, terminal)
+			}
 		}()
 	})
+	if processRunning {
+		deploy.SetText("Running")
+		deploy.Disable()
+	}
 
 	return container.NewBorder(
 		nil,

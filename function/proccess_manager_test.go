@@ -1,21 +1,95 @@
 package function
 
 import (
-	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
 func TestStripANSISequencesAllowsPM2JSONParsing(t *testing.T) {
 	input := []byte("\x1b[32m[{\"name\":\"api\"}]\x1b[0m")
-	cleaned := stripANSISequences(input)
-
-	var processes []PM2Process
-	if err := json.Unmarshal(cleaned, &processes); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
+	processes, err := parsePM2Processes(stripANSISequences(input))
+	if err != nil {
+		t.Fatalf("parsePM2Processes() error = %v", err)
 	}
 	if len(processes) != 1 || processes[0].Name != "api" {
 		t.Fatalf("parsed processes = %#v, want one process named api", processes)
+	}
+}
+
+func TestParsePM2ProcessesSetsRunningFromStatus(t *testing.T) {
+	input := []byte(`[
+		{"name":"online-app","pm2_env":{"status":"online"}},
+		{"name":"stopped-app","pm2_env":{"status":"stopped"}},
+		{"name":"missing-status","pm2_env":{}}
+	]`)
+
+	processes, err := parsePM2Processes(input)
+	if err != nil {
+		t.Fatalf("parsePM2Processes() error = %v", err)
+	}
+	if len(processes) != 3 {
+		t.Fatalf("parsed %d processes, want 3", len(processes))
+	}
+
+	wantRunning := map[string]bool{
+		"online-app":     true,
+		"stopped-app":    false,
+		"missing-status": false,
+	}
+	for _, process := range processes {
+		want, ok := wantRunning[process.Name]
+		if !ok {
+			t.Errorf("unexpected process %q", process.Name)
+			continue
+		}
+		if process.IsRunning != want {
+			t.Errorf("process %q IsRunning = %t, want %t", process.Name, process.IsRunning, want)
+		}
+		delete(wantRunning, process.Name)
+	}
+	for name := range wantRunning {
+		t.Errorf("process %q not found", name)
+	}
+}
+
+func TestPM2DeployArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		projectName string
+		existing    *PM2Process
+		wantArgs    []string
+		wantErr     bool
+	}{
+		{
+			name:        "starts a new process",
+			projectName: "site",
+			wantArgs:    []string{"start", "npm", "--name", "site", "--", "start"},
+		},
+		{
+			name:        "restarts a stopped process",
+			projectName: "site",
+			existing:    &PM2Process{PM2ID: 7},
+			wantArgs:    []string{"restart", "7"},
+		},
+		{
+			name:        "rejects an already running process",
+			projectName: "site",
+			existing:    &PM2Process{Name: "site", IsRunning: true},
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := pm2DeployArgs(tt.projectName, tt.existing)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("pm2DeployArgs() error = %v, wantErr %t", err, tt.wantErr)
+			}
+			if !reflect.DeepEqual(got, tt.wantArgs) {
+				t.Errorf("pm2DeployArgs() = %#v, want %#v", got, tt.wantArgs)
+			}
+		})
 	}
 }
 

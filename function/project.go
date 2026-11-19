@@ -1,6 +1,7 @@
 package function
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -8,18 +9,149 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 )
 
 type Project struct {
-	Name                string
-	PersonalAccessToken string
-	RepositoryURL       string
-	Branch              string
-	GitUsername         string
-	GitEmail            string
-	NpmPackage          *NpmPackage
-	PM2Process          *PM2Process
+	Name                 string
+	PersonalAccessToken  string
+	RepositoryURL        string
+	Branch               string
+	GitUsername          string
+	GitEmail             string
+	BuildCommand         string
+	NpmPackage           *NpmPackage
+	PM2Process           *PM2Process
+	EnvironmentVariables map[string]string
+}
+
+func ParseEnvironmentFile(reader io.Reader) (map[string]string, error) {
+	variables := make(map[string]string)
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	lineNumber := 0
+	for scanner.Scan() {
+		lineNumber++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("parse environment file line %d: expected KEY=VALUE", lineNumber)
+		}
+		key = strings.TrimSpace(key)
+		if !validEnvironmentVariableName(key) {
+			return nil, fmt.Errorf("parse environment file line %d: invalid variable name %q", lineNumber, key)
+		}
+		value, err := parseEnvironmentValue(strings.TrimSpace(value))
+		if err != nil {
+			return nil, fmt.Errorf("parse environment file line %d: %w", lineNumber, err)
+		}
+		variables[key] = value
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read environment file: %w", err)
+	}
+	return variables, nil
+}
+
+func WriteProjectEnvironmentFile(project Project) (string, error) {
+	if project.EnvironmentVariables == nil {
+		return "", nil
+	}
+	if project.NpmPackage == nil || project.NpmPackage.PackagePath == "" {
+		return "", fmt.Errorf("cannot write project environment file without an npm package path")
+	}
+
+	path := filepath.Join(filepath.Dir(project.NpmPackage.PackagePath), ".env")
+	if err := WriteEnvironmentFile(path, project.EnvironmentVariables); err != nil {
+		return "", fmt.Errorf("write project environment file %q: %w", path, err)
+	}
+	return path, nil
+}
+
+func WriteEnvironmentFile(path string, variables map[string]string) error {
+	keys := make([]string, 0, len(variables))
+	for key := range variables {
+		if !validEnvironmentVariableName(key) {
+			return fmt.Errorf("invalid environment variable name %q", key)
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var contents strings.Builder
+	for _, key := range keys {
+		fmt.Fprintf(&contents, "%s=%s\n", key, strconv.Quote(variables[key]))
+	}
+	if err := os.WriteFile(path, []byte(contents.String()), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("set environment file permissions: %w", err)
+	}
+	return nil
+}
+
+func validEnvironmentVariableName(name string) bool {
+	if name == "" || !(name[0] == '_' || name[0] >= 'A' && name[0] <= 'Z' || name[0] >= 'a' && name[0] <= 'z') {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		c := name[i]
+		if c != '_' && !(c >= 'A' && c <= 'Z') && !(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func parseEnvironmentValue(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if value[0] != '\'' && value[0] != '"' {
+		for i := 0; i < len(value); i++ {
+			if value[i] == '#' && (i == 0 || value[i-1] == ' ' || value[i-1] == '\t') {
+				value = value[:i]
+				break
+			}
+		}
+		return strings.TrimSpace(value), nil
+	}
+
+	quote := value[0]
+	escaped := false
+	end := -1
+	for i := 1; i < len(value); i++ {
+		if quote == '"' && value[i] == '\\' && !escaped {
+			escaped = true
+			continue
+		}
+		if value[i] == quote && !escaped {
+			end = i
+			break
+		}
+		escaped = false
+	}
+	if end < 0 {
+		return "", fmt.Errorf("unterminated quoted value")
+	}
+	if trailing := strings.TrimSpace(value[end+1:]); trailing != "" && !strings.HasPrefix(trailing, "#") {
+		return "", fmt.Errorf("unexpected text after quoted value")
+	}
+	if quote == '\'' {
+		return value[1:end], nil
+	}
+	unquoted, err := strconv.Unquote(value[:end+1])
+	if err != nil {
+		return "", fmt.Errorf("invalid double-quoted value: %w", err)
+	}
+	return unquoted, nil
 }
 
 func CreateNewProject(state *State, project Project) error {

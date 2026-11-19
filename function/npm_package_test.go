@@ -124,3 +124,66 @@ func TestDetectNpmPackageProjectType(t *testing.T) {
 		})
 	}
 }
+
+func TestNpmBuildCommandDefaultsToPackageBuildScript(t *testing.T) {
+	tests := []struct {
+		name              string
+		buildCommand      string
+		script            string
+		wantCommand       string
+		wantPackageScript bool
+	}{
+		{
+			name:              "defaults to package build script",
+			script:            "vite build",
+			wantCommand:       "vite build",
+			wantPackageScript: true,
+		},
+		{
+			name:              "uses configured command",
+			buildCommand:      "npm run generate",
+			script:            "vite build",
+			wantCommand:       "npm run generate",
+			wantPackageScript: false,
+		},
+		{
+			name:              "trims configured command",
+			buildCommand:      "  npm run generate  ",
+			script:            "vite build",
+			wantCommand:       "npm run generate",
+			wantPackageScript: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project := Project{
+				BuildCommand: tt.buildCommand,
+				NpmPackage:   &NpmPackage{Scripts: map[string]string{"build": tt.script}},
+			}
+			command, usePackageScript := npmBuildCommand(project)
+			if command != tt.wantCommand {
+				t.Errorf("npmBuildCommand() command = %q, want %q", command, tt.wantCommand)
+			}
+			if usePackageScript != tt.wantPackageScript {
+				t.Errorf("npmBuildCommand() usePackageScript = %t, want %t", usePackageScript, tt.wantPackageScript)
+			}
+		})
+	}
+}
+
+func TestFindBuildOutputDirFindsConventionalOutput(t *testing.T) {
+	projectPath := t.TempDir()
+	want := filepath.Join(projectPath, ".next")
+	if err := os.Mkdir(want, 0o755); err != nil {
+		t.Fatalf("create conventional output directory: %v", err)
+	}
+
+	got, err := findBuildOutputDir(projectPath, NextJS)
+	if err != nil {
+		t.Fatalf("findBuildOutputDir() error = %v", err)
+	}
+	if got != want {
+		t.Errorf("findBuildOutputDir() = %q, want %q", got, want)
+	}
+}

@@ -3,20 +3,23 @@ package function
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
 type PM2Process struct {
-	PID      int            `json:"pid"`
-	Name     string         `json:"name"`
-	FilePath string         `json:"filePath"`
-	Path     string         `json:"path"`
-	PM2Env   map[string]any `json:"pm2_env"`
-	PM2ID    int            `json:"pm_id"`
-	Monit    Pm2Monit       `json:"monit"`
+	PID       int            `json:"pid"`
+	Name      string         `json:"name"`
+	FilePath  string         `json:"filePath"`
+	Path      string         `json:"path"`
+	PM2Env    map[string]any `json:"pm2_env"`
+	PM2ID     int            `json:"pm_id"`
+	Monit     Pm2Monit       `json:"monit"`
+	IsRunning bool           `json:"is_running"`
 }
 
 type Pm2Monit struct {
@@ -25,13 +28,68 @@ type Pm2Monit struct {
 }
 
 func GetPm2Process() ([]PM2Process, error) {
-	str, err := exec.Command("pm2", "prettylist").Output()
+	str, err := exec.Command("pm2", "jlist").Output()
 	if err != nil {
-		return []PM2Process{}, fmt.Errorf("run pm2 prettylist: %w", err)
+		return []PM2Process{}, fmt.Errorf("run pm2 jlist: %w", err)
 	}
+	processes, err := parsePM2Processes(stripANSISequences(str))
+	if err != nil {
+		return []PM2Process{}, fmt.Errorf("parse pm2 jlist output: %w", err)
+	}
+	return processes, nil
+}
+
+func Pm2DeployWithOutput(project Project, output io.Writer) error {
+	if output == nil {
+		output = io.Discard
+	}
+	if strings.TrimSpace(project.Name) == "" {
+		return fmt.Errorf("project name is required to start a PM2 process")
+	}
+
+	processes, err := GetPm2Process()
+	if err != nil {
+		return err
+	}
+	existing := DetectPm2Binding(&State{Pm2ProcessList: processes}, project)
+	args, err := pm2DeployArgs(project.Name, existing)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(output, "$ pm2 %s\n", strings.Join(args, " "))
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd.exe", append([]string{"/c", "pm2"}, args...)...)
+	} else {
+		cmd = exec.Command("pm2", args...)
+	}
+	cmd.Dir = filepath.Dir(npmPackageManifestPath(project))
+	cmd.Stdout = output
+	cmd.Stderr = output
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("run pm2 %s in %q: %w", strings.Join(args, " "), cmd.Dir, err)
+	}
+	return nil
+}
+
+func pm2DeployArgs(projectName string, existing *PM2Process) ([]string, error) {
+	if existing != nil {
+		if existing.IsRunning {
+			return nil, fmt.Errorf("PM2 process %q is already running", existing.Name)
+		}
+		return []string{"restart", strconv.Itoa(existing.PM2ID)}, nil
+	}
+	return []string{"start", "npm", "--name", projectName, "--", "start"}, nil
+}
+
+func parsePM2Processes(data []byte) ([]PM2Process, error) {
 	var processes []PM2Process
-	if err := json.Unmarshal(stripANSISequences(str), &processes); err != nil {
-		return []PM2Process{}, fmt.Errorf("parse pm2 prettylist output: %w", err)
+	if err := json.Unmarshal(data, &processes); err != nil {
+		return nil, err
+	}
+	for i := range processes {
+		processes[i].IsRunning = strings.EqualFold(mapString(processes[i].PM2Env, "status"), "online")
 	}
 	return processes, nil
 }
