@@ -60,15 +60,53 @@ func ParseEnvironmentFile(reader io.Reader) (map[string]string, error) {
 }
 
 func WriteProjectEnvironmentFile(project Project) (string, error) {
-	if project.EnvironmentVariables == nil {
-		return "", nil
-	}
 	if project.NpmPackage == nil || project.NpmPackage.PackagePath == "" {
+		if project.EnvironmentVariables == nil {
+			return "", nil
+		}
 		return "", fmt.Errorf("cannot write project environment file without an npm package path")
 	}
 
-	path := filepath.Join(filepath.Dir(project.NpmPackage.PackagePath), ".env")
-	if err := WriteEnvironmentFile(path, project.EnvironmentVariables); err != nil {
+	projectPath := filepath.Dir(project.NpmPackage.PackagePath)
+	variables := make(map[string]string)
+	buildEnvironment := ""
+	if project.EnvironmentVariables != nil {
+		buildEnvironment = strings.TrimSpace(project.EnvironmentVariables["ENV"])
+	}
+	if buildEnvironment == "" {
+		buildEnvironment = strings.TrimSpace(os.Getenv("ENV"))
+	}
+	if buildEnvironment != "" {
+		if strings.ContainsAny(buildEnvironment, `/\`) {
+			return "", fmt.Errorf("invalid ENV profile name %q", buildEnvironment)
+		}
+		profilePath := filepath.Join(projectPath, ".env."+buildEnvironment)
+		file, err := os.Open(profilePath)
+		if err == nil {
+			profileVariables, parseErr := ParseEnvironmentFile(file)
+			closeErr := file.Close()
+			if parseErr != nil {
+				return "", fmt.Errorf("parse environment profile %q: %w", profilePath, parseErr)
+			}
+			if closeErr != nil {
+				return "", fmt.Errorf("close environment profile %q: %w", profilePath, closeErr)
+			}
+			for key, value := range profileVariables {
+				variables[key] = value
+			}
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("open environment profile %q: %w", profilePath, err)
+		}
+	}
+	for key, value := range project.EnvironmentVariables {
+		variables[key] = value
+	}
+	if project.EnvironmentVariables == nil && len(variables) == 0 {
+		return "", nil
+	}
+
+	path := filepath.Join(projectPath, ".env")
+	if err := WriteEnvironmentFile(path, variables); err != nil {
 		return "", fmt.Errorf("write project environment file %q: %w", path, err)
 	}
 	return path, nil
@@ -190,7 +228,9 @@ func CreateNewProject(state *State, project Project) error {
 }
 
 func readGitConfig(key string) (string, error) {
-	output, err := exec.Command("git", "config", "--get", key).Output()
+	cmd := exec.Command("git", "config", "--get", key)
+	hideConsoleWindow(cmd)
+	output, err := cmd.Output()
 	if err != nil {
 		var exitError *exec.ExitError
 		if errors.As(err, &exitError) {
@@ -305,18 +345,19 @@ func FetchRepositoryWithOutput(project Project, output io.Writer) error {
 		output = io.Discard
 	}
 	base := filepath.Dir(GetConfigPath())
-
 	repoPath := filepath.Join(base, project.Name)
-	if _, err := os.Stat(repoPath); err == nil {
-		_, _ = fmt.Fprintf(output, "$ repository already exists at %s\n", repoPath)
-		return nil
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("check repository path %q: %w", repoPath, err)
-	}
-
 	cloneURL, err := repositoryCloneURL(project)
 	if err != nil {
 		return err
+	}
+
+	if info, err := os.Stat(repoPath); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("repository path %q is not a directory", repoPath)
+		}
+		return updateExistingRepository(project, repoPath, cloneURL, output)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check repository path %q: %w", repoPath, err)
 	}
 
 	// Redact the token from anything git prints (it echoes URLs in errors).
@@ -337,6 +378,7 @@ func FetchRepositoryWithOutput(project Project, output io.Writer) error {
 	args = append(args, cloneURL, repoPath)
 
 	cmd := exec.Command("git", args...)
+	hideConsoleWindow(cmd)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0") // fail instead of hanging on a prompt
 	// Same writer for both streams so exec serializes the copying.
 	cmd.Stdout = safeOutput
@@ -350,6 +392,7 @@ func FetchRepositoryWithOutput(project Project, output io.Writer) error {
 	if project.PersonalAccessToken != "" {
 		cleanURL := "https://" + normalizeRepositoryPath(project.RepositoryURL)
 		reset := exec.Command("git", "-C", repoPath, "remote", "set-url", "origin", cleanURL)
+		hideConsoleWindow(reset)
 		if out, err := reset.CombinedOutput(); err != nil {
 			return fmt.Errorf("reset remote url: %w: %s", err, safeRedact(string(out), project.PersonalAccessToken))
 		}
@@ -357,6 +400,81 @@ func FetchRepositoryWithOutput(project Project, output io.Writer) error {
 
 	_, _ = fmt.Fprintf(output, "$ repository cloned successfully\n")
 	return nil
+}
+
+func updateExistingRepository(project Project, repoPath, cloneURL string, output io.Writer) error {
+	safeOutput := &redactWriter{w: output, secret: strings.TrimSpace(project.PersonalAccessToken)}
+	checkout := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	hideConsoleWindow(checkout)
+	checkout.Dir = repoPath
+	result, err := checkout.Output()
+	if err != nil || strings.TrimSpace(string(result)) != "true" {
+		if err != nil {
+			return fmt.Errorf("existing project directory %q is not a Git checkout: %w", repoPath, err)
+		}
+		return fmt.Errorf("existing project directory %q is not a Git checkout", repoPath)
+	}
+
+	displayURL := safeRedact(project.RepositoryURL, strings.TrimSpace(project.PersonalAccessToken))
+	branch := strings.TrimSpace(project.Branch)
+	if branch != "" {
+		_, _ = fmt.Fprintf(output, "$ git fetch --progress %s %s\n", displayURL, branch)
+		if err := runGitCommand(repoPath, safeOutput, "fetch", "--progress", cloneURL, branch); err != nil {
+			return fmt.Errorf("fetch branch %q: %w", branch, err)
+		}
+		exists, err := localBranchExists(repoPath, branch)
+		if err != nil {
+			return err
+		}
+		if exists {
+			_, _ = fmt.Fprintf(output, "$ git checkout %s\n", branch)
+			if err := runGitCommand(repoPath, safeOutput, "checkout", branch); err != nil {
+				return fmt.Errorf("checkout branch %q: %w", branch, err)
+			}
+		} else {
+			_, _ = fmt.Fprintf(output, "$ git checkout -b %s FETCH_HEAD\n", branch)
+			if err := runGitCommand(repoPath, safeOutput, "checkout", "-b", branch, "FETCH_HEAD"); err != nil {
+				return fmt.Errorf("create branch %q from fetched repository: %w", branch, err)
+			}
+		}
+		_, _ = fmt.Fprintf(output, "$ git pull --progress %s %s\n", displayURL, branch)
+		if err := runGitCommand(repoPath, safeOutput, "pull", "--progress", cloneURL, branch); err != nil {
+			return fmt.Errorf("pull branch %q: %w", branch, err)
+		}
+	} else {
+		_, _ = fmt.Fprintf(output, "$ git pull --progress %s\n", displayURL)
+		if err := runGitCommand(repoPath, safeOutput, "pull", "--progress", cloneURL); err != nil {
+			return fmt.Errorf("pull repository updates: %w", err)
+		}
+	}
+
+	_, _ = fmt.Fprintln(output, "Repository updated successfully.")
+	return nil
+}
+
+func runGitCommand(repoPath string, output io.Writer, args ...string) error {
+	cmd := exec.Command("git", args...)
+	hideConsoleWindow(cmd)
+	cmd.Dir = repoPath
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Stdout = output
+	cmd.Stderr = output
+	return cmd.Run()
+}
+
+func localBranchExists(repoPath, branch string) (bool, error) {
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	hideConsoleWindow(cmd)
+	cmd.Dir = repoPath
+	if err := cmd.Run(); err == nil {
+		return true, nil
+	} else {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) && exitError.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("check local branch %q: %w", branch, err)
+	}
 }
 
 func repositoryCloneURL(project Project) (string, error) {

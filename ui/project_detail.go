@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"image/color"
 	"slices"
@@ -40,6 +41,21 @@ var (
 	colSuccessBg     = color.NRGBA{R: 0, G: 223, B: 130, A: 20}
 	colSuccessBorder = color.NRGBA{R: 0, G: 223, B: 130, A: 70}
 )
+
+var activePM2LogListener struct {
+	sync.Mutex
+	cancel context.CancelFunc
+}
+
+func stopActivePM2LogListener() {
+	activePM2LogListener.Lock()
+	cancel := activePM2LogListener.cancel
+	activePM2LogListener.cancel = nil
+	activePM2LogListener.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
 
 // =====================================================================
 // Terminal view (io.Writer that safely updates the UI)
@@ -329,6 +345,7 @@ func (s *deployStatus) Set(label string, c color.Color) {
 // =====================================================================
 
 func NewProjectDetail(project functions.Project) fyne.CanvasObject {
+	stopActivePM2LogListener()
 	terminal := newTerminalView("$ ready to deploy\n")
 	status := newDeployStatus()
 	npmPackage, npmErr := functions.DetectNpmPackage(project)
@@ -371,6 +388,28 @@ func NewProjectDetail(project functions.Project) fyne.CanvasObject {
 
 	var deploy *widget.Button
 	processRunning := project.PM2Process != nil && project.PM2Process.IsRunning
+	if process := project.PM2Process; process != nil {
+		if process.IsRunning {
+			status.Set("Running", colSuccess)
+		} else if pm2Status, ok := process.PM2Env["status"].(string); ok && strings.TrimSpace(pm2Status) != "" {
+			statusLabel := strings.TrimSpace(pm2Status)
+			status.Set(strings.ToUpper(statusLabel[:1])+statusLabel[1:], colDanger)
+		} else {
+			status.Set("Stopped", colTextMuted)
+		}
+
+		processID := process.PM2ID
+		terminal.Reset(fmt.Sprintf("$ pm2 logs %d --lines 100\n", processID))
+		ctx, cancel := context.WithCancel(context.Background())
+		activePM2LogListener.Lock()
+		activePM2LogListener.cancel = cancel
+		activePM2LogListener.Unlock()
+		go func() {
+			if err := functions.Pm2LogsWithOutput(ctx, processID, terminal); err != nil {
+				_, _ = fmt.Fprintf(terminal, "\nERROR: %v\n", err)
+			}
+		}()
+	}
 	deploy = widget.NewButtonWithIcon("Deploy", theme.UploadIcon(), func() {
 		deploy.Disable()
 		deploy.SetText("Deploying...")
