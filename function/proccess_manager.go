@@ -233,8 +233,64 @@ func Pm2DeployWithOutput(project Project, output io.Writer) error {
 		return fmt.Errorf("PM2 process %q is already running", existing.Name)
 	}
 
-	replaceExisting := existing != nil && (standaloneDir != "" ||
-		replaceLegacyNpm)
+	var args []string
+	replaceExisting := false
+	if project.NpmPackage != nil {
+		configProject := project
+		script := "npm"
+		scriptArgs := []string{"start"}
+		configWorkingDir := workingDir
+		switch {
+		case standaloneDir != "":
+			configWorkingDir = standaloneDir
+			switch project.NpmPackage.ProjectType {
+			case NextJS:
+				script = filepath.Join(standaloneDir, "server.js")
+				configProject.EnvironmentVariables, err = nextRuntimeEnvironment(project, workingDir)
+			case NuxtJS:
+				script = filepath.Join(standaloneDir, "server", "index.mjs")
+				configProject.EnvironmentVariables, err = standaloneRuntimeEnvironment(project, workingDir, false)
+			}
+			if err != nil {
+				return err
+			}
+			scriptArgs = nil
+		case useDirectNextStart:
+			script, err = nextCLIScriptPath(project)
+			if err != nil {
+				return err
+			}
+			scriptArgs = append([]string{"start"}, nextStartArgs...)
+		case runtime.GOOS == "windows":
+			script, err = npmCLIScriptPath()
+			if err != nil {
+				return err
+			}
+		}
+		configPath, err := writeProjectEcosystemConfig(configProject, script, scriptArgs, configWorkingDir)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(output, "Generated PM2 ecosystem config: %s\n", configPath)
+		args = []string{"start", filepath.Base(configPath)}
+		replaceExisting = existing != nil && (!existing.IsRunning || replaceLegacyNpm)
+	} else if standaloneDir != "" {
+		args = pm2StandaloneArgs()
+		workingDir = standaloneDir
+	} else {
+		npmCLIPath := ""
+		if existing == nil && runtime.GOOS == "windows" {
+			npmCLIPath, err = npmCLIScriptPath()
+			if err != nil {
+				return err
+			}
+		}
+		args, err = pm2DeployArgs(project.Name, existing, npmCLIPath)
+		if err != nil {
+			return err
+		}
+	}
+
 	if replaceExisting {
 		deleteArgs := []string{"delete", strconv.Itoa(existing.PM2ID)}
 		_, _ = fmt.Fprintf(output, "$ pm2 %s\n", strings.Join(deleteArgs, " "))
@@ -250,29 +306,6 @@ func Pm2DeployWithOutput(project Project, output io.Writer) error {
 		existing = nil
 	}
 
-	var args []string
-	if standaloneDir != "" {
-		args = pm2StandaloneArgs()
-		workingDir = standaloneDir
-	} else if useDirectNextStart {
-		nextPath, err := nextCLIScriptPath(project)
-		if err != nil {
-			return err
-		}
-		args = pm2WindowsNextStartArgs(project.Name, nextPath, nextStartArgs)
-	} else {
-		npmCLIPath := ""
-		if existing == nil && runtime.GOOS == "windows" {
-			npmCLIPath, err = npmCLIScriptPath()
-			if err != nil {
-				return err
-			}
-		}
-		args, err = pm2DeployArgs(project.Name, existing, npmCLIPath)
-		if err != nil {
-			return err
-		}
-	}
 	_, _ = fmt.Fprintf(output, "$ pm2 %s\n", strings.Join(args, " "))
 
 	cmd, err := pm2Command(args...)

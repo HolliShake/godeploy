@@ -143,6 +143,21 @@ func newTerminalView(initial string) *terminalView {
 // Object returns the widget to place in a layout.
 func (t *terminalView) Object() fyne.CanvasObject { return t.view }
 
+// Content returns the retained terminal output, including any partial line.
+func (t *terminalView) Content() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	start := max(0, len(t.lines)-terminalMaxLines)
+	var content strings.Builder
+	for _, line := range t.lines[start:] {
+		content.WriteString(line)
+		content.WriteByte('\n')
+	}
+	content.Write(t.cur)
+	return content.String()
+}
+
 // Reset replaces the whole content.
 func (t *terminalView) Reset(text string) {
 	t.mu.Lock()
@@ -349,6 +364,16 @@ func NewProjectDetail(project functions.Project) fyne.CanvasObject {
 	terminal := newTerminalView("$ ready to deploy\n")
 	status := newDeployStatus()
 	npmPackage, npmErr := functions.DetectNpmPackage(project)
+	copyOutput := widget.NewButtonWithIcon("Copy output", theme.ContentCopyIcon(), nil)
+	copyOutput.OnTapped = func() {
+		if app := fyne.CurrentApp(); app != nil {
+			app.Clipboard().SetContent(terminal.Content())
+			copyOutput.SetText("Copied")
+			time.AfterFunc(1500*time.Millisecond, func() {
+				fyne.Do(func() { copyOutput.SetText("Copy output") })
+			})
+		}
+	}
 
 	content := container.NewVBox(
 		projectHeader(project),
@@ -379,6 +404,8 @@ func NewProjectDetail(project functions.Project) fyne.CanvasObject {
 		card("Deployment output", "Live output from the deployment command.",
 			status.obj,
 			vSpacer(8),
+			container.NewHBox(layout.NewSpacer(), copyOutput),
+			vSpacer(4),
 			terminal.Object(),
 		),
 	)

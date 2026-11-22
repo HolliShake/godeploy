@@ -2,6 +2,7 @@ package function
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -320,6 +321,63 @@ func TestPackageManagerForProjectUsesBunLockfile(t *testing.T) {
 		if err := os.Remove(filepath.Join(projectPath, name)); err != nil {
 			t.Fatalf("remove %s: %v", name, err)
 		}
+	}
+}
+
+func TestWriteProjectEcosystemConfigWritesBesidePackageManifest(t *testing.T) {
+	projectPath := filepath.Join(t.TempDir(), "frontend")
+	manifestPath := filepath.Join(projectPath, "package.json")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatalf("create npm project directory: %v", err)
+	}
+	if err := os.WriteFile(manifestPath, []byte(`{"name":"site"}`), 0o600); err != nil {
+		t.Fatalf("write package manifest: %v", err)
+	}
+	project := Project{
+		Name:       "site",
+		NpmPackage: &NpmPackage{PackagePath: manifestPath},
+		EnvironmentVariables: map[string]string{
+			"PORT": "3001",
+		},
+	}
+
+	configPath, err := writeProjectEcosystemConfig(project, "npm", []string{"start"}, projectPath)
+	if err != nil {
+		t.Fatalf("writeProjectEcosystemConfig() error = %v", err)
+	}
+	wantPath := filepath.Join(projectPath, "ecosystem.config.js")
+	if configPath != wantPath {
+		t.Fatalf("writeProjectEcosystemConfig() path = %q, want %q", configPath, wantPath)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read generated PM2 config: %v", err)
+	}
+	jsonData := strings.TrimSuffix(strings.TrimPrefix(string(data), "module.exports = "), ";\n")
+	var config struct {
+		Apps []struct {
+			Name   string            `json:"name"`
+			Script string            `json:"script"`
+			Args   []string          `json:"args"`
+			Cwd    string            `json:"cwd"`
+			Env    map[string]string `json:"env"`
+		} `json:"apps"`
+	}
+	if err := json.Unmarshal([]byte(jsonData), &config); err != nil {
+		t.Fatalf("parse generated PM2 config: %v", err)
+	}
+	if len(config.Apps) != 1 {
+		t.Fatalf("generated PM2 app count = %d, want 1", len(config.Apps))
+	}
+	app := config.Apps[0]
+	absoluteProjectPath, err := filepath.Abs(projectPath)
+	if err != nil {
+		t.Fatalf("resolve package directory: %v", err)
+	}
+	if app.Name != project.Name || app.Script != "npm" || app.Cwd != absoluteProjectPath ||
+		len(app.Args) != 1 || app.Args[0] != "start" || app.Env["PORT"] != "3001" {
+		t.Errorf("generated PM2 app = %#v", app)
 	}
 }
 

@@ -705,6 +705,58 @@ func writeStandaloneEcosystemConfig(projectName, deploymentDir, serverRelativePa
 	return nil
 }
 
+func writeProjectEcosystemConfig(project Project, script string, args []string, workingDir string) (string, error) {
+	packagePath := npmPackageManifestPath(project)
+	configPath := filepath.Join(filepath.Dir(packagePath), "ecosystem.config.js")
+	absoluteWorkingDir, err := filepath.Abs(workingDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve npm project directory: %w", err)
+	}
+	if filepath.IsAbs(script) {
+		script, err = filepath.Abs(script)
+		if err != nil {
+			return "", fmt.Errorf("resolve npm application script: %w", err)
+		}
+	}
+
+	config := struct {
+		Apps []struct {
+			Name   string            `json:"name"`
+			Script string            `json:"script"`
+			Args   []string          `json:"args,omitempty"`
+			Cwd    string            `json:"cwd"`
+			Env    map[string]string `json:"env"`
+		} `json:"apps"`
+	}{}
+	environment := make(map[string]string, len(project.EnvironmentVariables))
+	for key, value := range project.EnvironmentVariables {
+		environment[key] = value
+	}
+	config.Apps = append(config.Apps, struct {
+		Name   string            `json:"name"`
+		Script string            `json:"script"`
+		Args   []string          `json:"args,omitempty"`
+		Cwd    string            `json:"cwd"`
+		Env    map[string]string `json:"env"`
+	}{
+		Name: project.Name, Script: script, Args: args, Cwd: absoluteWorkingDir,
+		Env: environment,
+	})
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encode npm PM2 configuration: %w", err)
+	}
+	contents := append([]byte("module.exports = "), data...)
+	contents = append(contents, ';', '\n')
+	if err := os.WriteFile(configPath, contents, 0o600); err != nil {
+		return "", fmt.Errorf("write npm PM2 configuration %q: %w", configPath, err)
+	}
+	if err := os.Chmod(configPath, 0o600); err != nil {
+		return "", fmt.Errorf("set npm PM2 configuration permissions: %w", err)
+	}
+	return configPath, nil
+}
+
 func copyDirectory(source, destination string) error {
 	if err := os.MkdirAll(destination, 0o755); err != nil {
 		return err
